@@ -1,6 +1,6 @@
 import * as THREE from './three.module.min.js';
 
-// Curved cylindrical spacetime surface, procedural UV flow and GPU post effects.
+// Curved particle-wall spacetime tunnel with GPU lens and motion effects.
 export function createWarp(canvas) {
   const renderer = new THREE.WebGLRenderer({canvas,antialias:false,alpha:false,powerPreference:'high-performance'});
   renderer.setClearColor(0x02030e,1);
@@ -11,45 +11,50 @@ export function createWarp(canvas) {
   const camera=new THREE.PerspectiveCamera(86,1,.1,420);
   const theme=new THREE.Color();
   const common={uTime:{value:0},uTravel:{value:0},uSpeed:{value:0},uTheme:{value:theme}};
+  // A curved wall of discrete GPU particles; no continuous surface mesh.
+  const wallCount=innerWidth<700?12000:30000;
+  const wallPositions=new Float32Array(wallCount*3),wallSeeds=new Float32Array(wallCount*3);
+  for(let i=0;i<wallCount;i++){
+    const j=i*3;
+    wallPositions[j]=Math.random()*Math.PI*2;
+    wallPositions[j+1]=(i+Math.random())/wallCount;
+    wallPositions[j+2]=Math.random()*2-1;
+    wallSeeds[j]=Math.random();wallSeeds[j+1]=Math.random();wallSeeds[j+2]=Math.random();
+  }
+  const geometry=new THREE.BufferGeometry();
+  geometry.setAttribute('position',new THREE.BufferAttribute(wallPositions,3));
+  geometry.setAttribute('aSeed',new THREE.BufferAttribute(wallSeeds,3));
+  common.uPixelRatio={value:1};
   const surface=new THREE.ShaderMaterial({
-    uniforms:common,side:THREE.DoubleSide,depthWrite:true,
-    vertexShader:`varying vec2 vUv; varying float vDepth;
-      uniform float uTime;
+    uniforms:common,transparent:true,depthWrite:false,depthTest:true,blending:THREE.AdditiveBlending,
+    vertexShader:`attribute vec3 aSeed;varying float vAlpha;varying float vTint;
+      uniform float uTime,uTravel,uSpeed,uPixelRatio;
       void main(){
-        vUv=uv;float t=uv.y;float z=7.0-t*280.0;
+        float t=fract(position.y-uTravel*.0017);
+        float theta=position.x+t*4.0+uTime*.23;
+        float filament=.5+.5*sin(theta*11.0+t*40.0+aSeed.x*2.0);
         float radius=12.0-4.0*exp(-pow((t-.43)*5.0,2.0))+3.0*t;
-        float theta=uv.x*6.2831853;
-        radius+=.7*sin(t*34.0-uTime*2.0+theta*3.0)+.35*sin(theta*7.0+t*20.0);
+        radius+=position.z*(.8+aSeed.y*1.3)+.7*sin(t*34.0-uTime*2.0+theta*3.0);
         vec2 bend=vec2(sin(t*7.2-uTime*.27),cos(t*5.4+uTime*.21))*pow(t,1.45)*20.0;
-        vec3 p=vec3(cos(theta)*radius+bend.x,sin(theta)*radius+bend.y,z);
-        vDepth=t;gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+        vec3 p=vec3(cos(theta)*radius+bend.x,sin(theta)*radius+bend.y,7.0-t*280.0);
+        vec4 view=modelViewMatrix*vec4(p,1.0);
+        float fade=smoothstep(.012,.06,t)*(1.0-smoothstep(.8,1.0,t));
+        vAlpha=fade*(.28+filament*.62)*(.7+.3*sin(uTime*2.0+aSeed.x*30.0));
+        vTint=aSeed.z;
+        gl_PointSize=clamp((1.1+aSeed.z*2.4)*uPixelRatio*145.0/max(1.0,-view.z),1.0,9.0*uPixelRatio);
+        gl_Position=projectionMatrix*view;
       }`,
-    fragmentShader:`varying vec2 vUv;varying float vDepth;uniform float uTime,uTravel,uSpeed;uniform vec3 uTheme;
-      float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
-      float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);}
-      float fbm(vec2 p){float v=0.,a=.5;for(int i=0;i<4;i++){v+=a*noise(p);p=p*2.04+3.1;a*=.5;}return v;}
+    fragmentShader:`varying float vAlpha;varying float vTint;uniform vec3 uTheme;
       void main(){
-        float t=vUv.y;
-        vec2 uv=vec2(vUv.x+sin(t*8.-uTime*.4)*.045+t*.38,t*6.-uTravel*.035);
-        float n=fbm(uv*vec2(9.,4.));
-        float angle=uv.x*6.2831853;
-        float threads=pow(.5+.5*sin(angle*24.+n*6.+t*15.),16.);
-        float cross=pow(.5+.5*sin((t*92.-uTravel*.38)+sin(angle*5.+uTime*.5)*.9),28.);
-        float plasma=pow(max(n-.3,0.)*1.6,2.4);
-        vec3 ice=vec3(.12,.32,.7),violet=vec3(.35,.1,.62);
-        vec3 base=mix(ice,violet,.5+.5*sin(angle*2.+uTime*.3));
-        vec3 color=base*(.06+plasma*.8);
-        color+=mix(vec3(.22,.5,1.),uTheme,.42)*(threads*.7+cross*.55);
-        color+=uTheme*pow(max(n-.56,0.)*3.,2.)*.8;
-        float mouth=exp(-pow((t-.55)*5.,2.));
-        color+=mix(vec3(.05,.12,.35),uTheme*.15,mouth)*mouth;
-        float nearFade=smoothstep(0.,.03,t);float farFade=1.-smoothstep(.8,1.,t);
-        color*=nearFade*farFade*(.6+uSpeed*.35);
-        gl_FragColor=vec4(color,1.);
+        float d=length(gl_PointCoord-vec2(.5))*2.0;
+        if(d>1.0)discard;
+        float glow=exp(-d*d*14.0)+.24*exp(-d*d*3.5);
+        vec3 color=mix(vec3(.22,.48,1.0),uTheme,.25+vTint*.6);
+        color=mix(color,vec3(.78,.88,1.0),pow(vTint,7.0)*.75);
+        gl_FragColor=vec4(color*1.1,glow*vAlpha);
       }`
   });
-  const geometry=new THREE.CylinderGeometry(1,1,1,80,150,true);
-  const tube=new THREE.Mesh(geometry,surface);tube.frustumCulled=false;scene.add(tube);
+  const wallParticles=new THREE.Points(geometry,surface);wallParticles.frustumCulled=false;scene.add(wallParticles);
   // Camera-facing strips stretch each 3D star along the viewing axis.
   const count=innerWidth<700?180:330,positions=[],uvs=[],seeds=[];
   for(let i=0;i<count;i++){
@@ -76,7 +81,7 @@ export function createWarp(canvas) {
     fragmentShader:`varying vec2 vUv;uniform sampler2D tNow,tPrevious;uniform float uHistory,uZoom;void main(){vec3 now=texture2D(tNow,vUv).rgb;vec2 uv=.5+(vUv-.5)*(1.-uZoom);vec3 old=texture2D(tPrevious,uv).rgb;gl_FragColor=vec4(mix(now,old,uHistory),1.);}`});
   const output=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,uniforms:{tFrame:{value:historyB.texture},uFade:{value:1}},vertexShader:fullVertex,
     fragmentShader:`varying vec2 vUv;uniform sampler2D tFrame;uniform float uFade;void main(){vec3 c=texture2D(tFrame,vUv).rgb;gl_FragColor=vec4(pow(c,vec3(.8))*uFade,1.);}`});
-  function resize(){const nw=innerWidth,nh=innerHeight;if(nw===width&&nh===height)return;width=nw;height=nh;const pixelRatio=Math.min(devicePixelRatio||1,innerWidth<700?1.25:1.4,1440/Math.max(nw,nh));renderer.setPixelRatio(pixelRatio);renderer.setSize(nw,nh,false);camera.aspect=nw/nh;camera.updateProjectionMatrix();lens.uniforms.uAspect.value=nw/nh;for(const t of [sceneTarget,lensTarget,historyA,historyB])t.setSize(Math.round(nw*pixelRatio),Math.round(nh*pixelRatio));needsReset=true;}
+  function resize(){const nw=innerWidth,nh=innerHeight;if(nw===width&&nh===height)return;width=nw;height=nh;const pixelRatio=Math.min(devicePixelRatio||1,innerWidth<700?1.25:1.4,1440/Math.max(nw,nh));renderer.setPixelRatio(pixelRatio);common.uPixelRatio.value=pixelRatio;renderer.setSize(nw,nh,false);camera.aspect=nw/nh;camera.updateProjectionMatrix();lens.uniforms.uAspect.value=nw/nh;for(const t of [sceneTarget,lensTarget,historyA,historyB])t.setSize(Math.round(nw*pixelRatio),Math.round(nh*pixelRatio));needsReset=true;}
   function render(ms,p,hue){if(lost)return false;try{resize();const time=ms*.001,speed=Math.sin(Math.min(p/.83,1)*Math.PI)*1.1+.25;if(ms<previousTime)needsReset=true;previousTime=ms;
     theme.setHSL(hue/360,.72,.62);common.uTime.value=time;common.uTravel.value=time*48+time*time*7;common.uSpeed.value=speed;
     camera.position.set(Math.sin(time*.65)*.65,Math.cos(time*.55)*.45,3);camera.lookAt(Math.sin(time*.25)*1.6,Math.cos(time*.32)*1.1,-60);camera.rotation.z=Math.sin(time*.8)*.045;camera.fov=84+speed*9;camera.updateProjectionMatrix();
